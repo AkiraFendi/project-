@@ -1,5 +1,7 @@
 import os
 import logging
+import re
+from sympy import S
 import pandas as pd
 from typing import Dict, Any, List, Optional
 from sympy import (
@@ -107,7 +109,7 @@ class MathRAG:
             raise
 
     def _init_llm(self):
-        """Инициализация языковой модели GigaChat"""
+        """Инициализация GigaChat"""
         if not os.getenv("GIGACHAT_CREDENTIALS"):
             raise ValueError("Не найдены учетные данные GigaChat!")
 
@@ -119,7 +121,7 @@ class MathRAG:
         )
 
     def _init_embeddings(self):
-        """Инициализация модели эмбеддингов"""
+        """Инициализация эмбеддингов"""
         self.embeddings = HuggingFaceEmbeddings(
             model_name="cointegrated/LaBSE-en-ru",
             model_kwargs={'device': 'cpu'},
@@ -127,10 +129,9 @@ class MathRAG:
         )
 
     def _init_vector_db(self):
-        """Инициализация векторной базы данных"""
+        """Инициализация векторной БД"""
         try:
             os.makedirs(self.db_path, exist_ok=True)
-
             if os.path.exists(f"{self.db_path}/index.faiss"):
                 self.vector_db = FAISS.load_local(
                     self.db_path,
@@ -149,25 +150,41 @@ class MathRAG:
         initial_docs = [
             Document(
                 page_content="solve equation x + 2 = 4",
-                metadata={
-                    "code": self._base_equation_code(),
-                    "lang": "en"
-                }
+                metadata={"code": self._base_equation_code(), "lang": "en"}
             ),
             Document(
                 page_content="решить уравнение x + 2 = 4",
-                metadata={
-                    "code": self._base_equation_code(),
-                    "lang": "ru"
-                }
+                metadata={"code": self._base_equation_code(), "lang": "ru"}
             )
         ]
         self.vector_db = FAISS.from_documents(initial_docs, self.embeddings)
         self._save_db()
         logger.info("Создана новая векторная БД")
 
+    def _save_db(self):
+        """Сохранение БД"""
+        self.vector_db.save_local(self.db_path)
+
+    def _normalize_input(self, text: str) -> str:
+        """Нормализация математических выражений"""
+        replacements = (
+            ('^', '**'),
+            ('÷', '/'),
+            ('×', '*'),
+            ('–', '-'),
+            ('−', '-'),
+            ('\\', ''),
+            ('‘', "'"),
+            ('’', "'"),
+            ('`', "'")
+        )
+        for old, new in replacements:
+            text = text.replace(old, new)
+        text = re.sub(r'(\d+)([a-zA-Z]+)', r'\1*\2', text)  # 3x → 3*x
+        return text.strip()
+
     def solve_problem(self, query: str, lang: str = "ru") -> Dict[str, Any]:
-        """Основной метод решения математических задач"""
+        """Основной метод решения задач"""
         try:
             query = self._normalize_input(query)
             logger.info(f"Обработка запроса: '{query}' (язык: {lang})")
@@ -175,24 +192,21 @@ class MathRAG:
             if not query:
                 return self._error_response("empty_query", lang)
 
-            # Обработка простых вычислений без переменных
-            if not any(c.isalpha() for c in query):
-                try:
-                    expr = sympify(query)
+            # Обработка простых вычислений
+            try:
+                expr = sympify(query, evaluate=False)
+                if expr.is_Number or not expr.free_symbols:
                     result = expr.evalf()
                     return self._format_simple_calculation(query, result, lang)
-                except SympifyError:
-                    pass
+            except SympifyError:
+                pass
 
             if self._is_equation(query):
                 return self._solve_equation(query, lang)
-
             if self._is_derivative(query):
                 return self._solve_derivative(query, lang)
-
             if self._is_integral(query):
                 return self._solve_integral(query, lang)
-
             return self._solve_general(query, lang)
 
         except SecurityError as e:
@@ -220,92 +234,45 @@ class MathRAG:
         except:
             return str(number)
 
-    def _solve_integral(self, query: str, lang: str) -> Dict[str, Any]:
-        try:
-            # Извлекаем выражение после ключевых слов
-            expr_str = query.split("от")[-1].strip()
-            expr = parse_expr(expr_str, transformations=transformations)
-            integral = integrate(expr, self.x)
-
-            # Форматируем шаги решения без символов $
-            steps = [
-                f"{self.LOCALES[lang]['integral']['function']}: {latex(expr)}",
-                f"{self.LOCALES[lang]['integral']['integral']}: {latex(integral)} + C"
-            ]
-
-            # Результат с LaTeX без $
-            result_tex = f"{latex(integral)} + C"
-
-            # Генерируем код
-            code = f"""from sympy import symbols, integrate
-    x = symbols('x')
-    print(integrate('{expr_str}', x))"""
-
-            return {
-                "result": result_tex,
-                "formatted_steps": "\n".join(steps),
-                "code": code,
-                "lang": lang
-            }
-        except SympifyError as e:
-            return self._error_response("parse", lang, error=str(e))
-
-            # Форматируем LaTeX для Telegram
-            def format_tex(formula: str) -> str:
-                return f"`${formula}$`"  # Обрамляем в $ и экранируем backticks
-
-            # Шаги решения с правильным форматированием
-            steps = [
-                f"{self.LOCALES[lang]['integral']['function']}: {format_tex(latex(expr))}",
-                f"{self.LOCALES[lang]['integral']['integral']}: {format_tex(latex(integral) + r'+ C')}"
-            ]
-
-            # Форматируем результат для разных случаев
-            result_tex = format_tex(latex(integral) + r'+ C')
-
-            # Генерируем код
-            code = f"""# -*- coding: utf-8 -*-
-    from sympy import symbols, integrate
-    x = symbols('x')
-    result = integrate({expr_str}, x)
-    print(f"{{result}} + C")"""
-
-            return {
-                "result": result_tex,
-                "formatted_steps": "\n".join(steps),
-                "code": code,
-                "lang": lang
-            }
-
-        except SympifyError as e:
-            return self._error_response("parse", lang, error=str(e))
-
-    def _is_integral(self, query: str) -> bool:
-        keywords = ["интеграл", "integral", "∫", "проинтегрируй", "integrate"]
-        return any(kw in query.lower() for kw in keywords)
+    def _is_equation(self, query: str) -> bool:
+        keywords = ["реши", "solve", "уравнение", "equation", "="]
+        return any(kw in query.lower() for kw in keywords) and "=" in query
 
     def _solve_equation(self, query: str, lang: str) -> Dict[str, Any]:
         try:
             if '=' not in query:
                 raise ValueError("Уравнение должно содержать знак '='")
 
+            # Парсинг уравнения
             equation = self._parse_equation(query, lang)
-            solution = solve(equation, self.x)
+            logger.info(f"Уравнение после парсинга: {equation}")  # Логирование
 
-            if not solution:
-                return self._error_response("no_solution", lang)
+            # Решение уравнения с явным указанием действительной области
+            solution = solve(equation, self.x, domain=S.Reals)
+            logger.info(f"Найденные корни: {solution}")  # Логирование
 
-            if not all(s.is_real for s in solution):
+            # Фильтрация действительных корней
+            real_solutions = []
+            for s in solution:
+                # Явная проверка типа и значения
+                if s.is_real and not s.has(S.ComplexInfinity):
+                    real_solutions.append(s)
+                else:
+                    logger.warning(f"Отфильтрован корень: {s}")
+
+            if not real_solutions:
                 return self._error_response("complex_solution", lang)
 
+            # Форматирование результата
+            solutions_str = ", ".join([f"x = {self._format_number(s)}" for s in real_solutions])
             steps = [
                 f"{self.LOCALES[lang]['equation']['original']}: {latex(equation)}",
                 f"{self.LOCALES[lang]['equation']['simplified']}: {latex(equation.lhs - equation.rhs)} = 0",
-                f"{self.LOCALES[lang]['equation']['solution']}: x = {latex(solution[0])}"
+                f"{self.LOCALES[lang]['equation']['solution']}: {solutions_str}"
             ]
 
             return {
-                "result": f"x = {self._format_number(solution[0])}",
+                "result": solutions_str,
                 "formatted_steps": "\n".join(steps),
                 "code": self._equation_code(equation, lang),
                 "lang": lang
@@ -315,14 +282,24 @@ class MathRAG:
 
     def _parse_equation(self, query: str, lang: str) -> Equality:
         try:
-            query = query.replace("уравнение", "").replace("equation", "").strip()
+            # Удаление ключевых слов на русском и английском
+            keywords = ["решить", "уравнение", "solve", "equation"]
+            for kw in keywords:
+                query = query.replace(kw, "")
+            query = query.strip()
+
+            # Проверка наличия знака равенства
+            if '=' not in query:
+                raise ValueError("Уравнение должно содержать знак '='")
+
+            # Разделение на левую и правую части
             lhs, rhs = query.split('=', 1)
-            return Eq(
-                parse_expr(lhs.strip(), transformations=transformations),
-                parse_expr(rhs.strip(), transformations=transformations)
-            )
+            lhs_expr = parse_expr(lhs.strip(), transformations=transformations)
+            rhs_expr = parse_expr(rhs.strip(), transformations=transformations)
+
+            return Eq(lhs_expr, rhs_expr)
         except (ValueError, SympifyError) as e:
-            raise ValueError(self._get_localized("errors.parse", lang).format(error=str(e)))
+            raise ValueError(self.LOCALES[lang]["errors"]["parse"].format(error=str(e)))
 
     def _equation_code(self, equation: Equality, lang: str) -> str:
         return f"""# -*- coding: utf-8 -*-
@@ -332,6 +309,10 @@ x = symbols('x')
 equation = Eq({latex(equation.lhs)}, {latex(equation.rhs)})
 solution = solve(equation, x)
 print(solution[0] if solution else "{self.LOCALES[lang]['errors']['no_solution']}")"""
+
+    def _is_derivative(self, query: str) -> bool:
+        keywords = ["производн", "derivative", "diff"]
+        return any(kw in query.lower() for kw in keywords)
 
     def _solve_derivative(self, query: str, lang: str) -> Dict[str, Any]:
         try:
@@ -353,10 +334,6 @@ print(solution[0] if solution else "{self.LOCALES[lang]['errors']['no_solution']
         except SympifyError as e:
             return self._error_response("parse", lang, error=str(e))
 
-    def _is_derivative(self, query: str) -> bool:
-        keywords = ["производн", "derivative", "diff"]
-        return any(kw in query.lower() for kw in keywords)
-
     def _derivative_code(self, expr, lang: str) -> str:
         return f"""# -*- coding: utf-8 -*-
 from sympy import symbols, diff
@@ -365,12 +342,37 @@ x = symbols('x')
 expr = {latex(expr)}
 print(diff(expr, x))"""
 
+    def _is_integral(self, query: str) -> bool:
+        keywords = ["интеграл", "integral", "∫", "проинтегрируй", "integrate"]
+        return any(kw in query.lower() for kw in keywords)
+
+    def _solve_integral(self, query: str, lang: str) -> Dict[str, Any]:
+        try:
+            expr_str = query.split("от")[-1].strip()
+            expr = parse_expr(expr_str, transformations=transformations)
+            integral = integrate(expr, self.x)
+
+            steps = [
+                f"{self.LOCALES[lang]['integral']['function']}: {latex(expr)}",
+                f"{self.LOCALES[lang]['integral']['integral']}: {latex(integral)} + C"
+            ]
+
+            return {
+                "result": f"{latex(integral)} + C",
+                "formatted_steps": "\n".join(steps),
+                "code": f"""from sympy import symbols, integrate
+x = symbols('x')
+print(integrate('{expr_str}', x))""",
+                "lang": lang
+            }
+        except SympifyError as e:
+            return self._error_response("parse", lang, error=str(e))
+
     def _solve_general(self, query: str, lang: str) -> Dict[str, Any]:
         try:
             examples = self.vector_db.similarity_search(query, k=3)
             context = self._build_context(examples, lang)
             code = self._generate_code(query, context, lang)
-
             execution_result = self.executor.execute(code)
 
             if execution_result['status'] != 'success':
@@ -386,40 +388,19 @@ print(diff(expr, x))"""
             return self._error_response("general", lang)
 
     def _generate_code(self, query: str, context: str, lang: str) -> str:
-        prompt = (
-            f"Generate Python code to solve: {query}\n"
-            f"Context examples:\n{context}\n\n"
-            "Requirements:\n"
-            "- Use SymPy library\n"
-            "- Add UTF-8 encoding declaration\n"
-            "- Avoid unsafe operations\n"
-            "- Output result with print()\n\n"
-            "Python code:"
-        )
-
-        try:
-            response = self.llm.chat(prompt)
-            code = response.choices[0].message.content
-            return self._sanitize_code(code, lang)
-        except Exception as e:
-            raise RuntimeError(f"Ошибка генерации кода: {str(e)}")
+        prompt = f"Generate Python code to solve: {query}\nContext examples:\n{context}\n\nRequirements:\n- Use SymPy\n- Add UTF-8 encoding\n- Avoid unsafe operations\nPython code:"
+        response = self.llm.chat(prompt)
+        code = response.choices[0].message.content
+        return self._sanitize_code(code, lang)
 
     def _sanitize_code(self, code: str, lang: str) -> str:
         clean_code = code.replace("```python", "").replace("```", "").strip()
-
-        dangerous_patterns = [
-            "__", "os.", "sys.", "open(", "eval(", "exec(",
-            "import os", "import sys", "subprocess"
-        ]
-
+        dangerous_patterns = ["__", "os.", "sys.", "open(", "eval(", "exec(", "import os", "import sys", "subprocess"]
         for pattern in dangerous_patterns:
             if pattern in clean_code:
-                error_msg = self.LOCALES[lang]["errors"]["security"].format(error=pattern)
-                raise SecurityError(error_msg)
-
+                raise SecurityError(self.LOCALES[lang]["errors"]["security"].format(error=pattern))
         if not clean_code.startswith("# -*- coding: utf-8 -*-"):
             clean_code = "# -*- coding: utf-8 -*-\n" + clean_code
-
         return clean_code
 
     def _build_context(self, examples: List[Document], lang: str) -> str:
@@ -434,48 +415,15 @@ print(diff(expr, x))"""
         docs = [
             Document(
                 page_content=row['text'],
-                metadata={
-                    "code": row['code'],
-                    "lang": row.get('lang', 'ru')
-                }
+                metadata={"code": row['code'], "lang": row.get('lang', 'ru')}
             ) for _, row in df.iterrows()
         ]
         self.vector_db.add_documents(docs)
         self._save_db()
 
-    def _save_db(self):
-        self.vector_db.save_local(self.db_path)
-
     def _error_response(self, error_type: str, lang: str, **kwargs) -> Dict[str, Any]:
         error_template = self.LOCALES[lang]["errors"].get(error_type, "Неизвестная ошибка")
         return {"error": error_template.format(**kwargs)}
-
-    def _get_localized(self, key: str, lang: str) -> str:
-        keys = key.split('.')
-        value = self.LOCALES[lang]
-        for k in keys:
-            value = value.get(k, {})
-        return value if isinstance(value, str) else key
-
-    def _normalize_input(self, text: str) -> str:
-        replacements = (
-            ('^', '**'),
-            ('÷', '/'),
-            ('×', '*'),
-            ('–', '-'),
-            ('−', '-'),
-            ('\\', ''),
-            ('‘', "'"),
-            ('’', "'"),
-            ('`', "'")
-        )
-        for old, new in replacements:
-            text = text.replace(old, new)
-        return text.strip()
-
-    def _is_equation(self, query: str) -> bool:
-        keywords = ["реши", "solve", "уравнение", "equation", "="]
-        return any(kw in query.lower() for kw in keywords) and "=" in query
 
     def _format_steps(self, steps: List[str], lang: str) -> str:
         return "\n".join([f"• {step}" for step in steps])
