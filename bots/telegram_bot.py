@@ -341,29 +341,24 @@ class TelegramBot:
 
     def _format_response(self, user_id: int, result: dict, lang: str) -> str:
         def escape(text: str) -> str:
-            return escape_markdown(str(text), version=2)
+            # Экранируем всё, кроме LaTeX-формул
+            return escape_markdown(text, version=2).replace(r"\(", "$").replace(r"\)", "$")
 
         parts = []
 
         if result.get("formatted_steps"):
-            title = self._get_text(user_id, "steps", lang=lang)
-            # Форматируем шаги с правильными LaTeX-обертками
             steps = "\n".join([
-                f"• `{escape(step.split(':')[0])}: ${escape(step.split(':')[1].strip())}$`"
+                f"• {escape(step)}"
                 for step in result["formatted_steps"].split("\n")
             ])
-            parts.append(f"📝 *{escape(title)}*:\n{steps}")
+            parts.append(f"📝 *{escape('Пошаговое решение')}:*\n{steps}")
 
-        # Результат
         if result.get("result"):
-            title = self._get_text(user_id, "result", lang=lang)
-            parts.append(f"✅ *{escape(title)}*: `{escape(result['result'])}`")
+            parts.append(f"✅ *{escape('Результат')}:* `{escape(result['result'])}`")
 
-        # Код
         if result.get("code"):
-            title = self._get_text(user_id, "code", lang=lang)
-            escaped_code = result['code'].replace('`', '\`')
-            parts.append(f"💻 *{escape(title)}*:\n```python\n{escaped_code}\n```")
+            code = result['code'].replace('`', '`\u200b')  # Экранируем backticks
+            parts.append(f"💻 *{escape('Код')}:*\n```python\n{code}\n```")
 
         return "\n\n".join(parts)
 
