@@ -1,14 +1,42 @@
-yandex-speechkit==1.5.0
-gigachat==0.1.39
-langchain-community==0.0.35
-faiss-cpu==1.8.0
-sentence-transformers==3.4.1
-pandas==2.2.3
-sympy==1.13.0
-docker==7.0.0
-python-dotenv==1.0.1
+# Основные зависимости
 python-telegram-bot==20.3
-python-dotenv==1.0.0
-langchain==0.2.2
-numpy==1.26.4
-faiss-cpu==1.7.4
+python-dotenv==1.0.1
+
+# Yandex services
+yandex-speechkit==1.5.0
+requests==2.31.0
+grpcio==1.60.0
+protobuf==4.25.1
+
+# NLP & AI
+gigachat>=0.1.35,<0.2.0
+langchain==0.3.21
+langchain-core==0.3.46
+langchain-community==0.3.20
+langchain-huggingface==0.1.2
+
+# Sentence Transformers
+sentence-transformers==3.4.1
+
+# Math & Data processing
+sympy==1.13.0
+pandas==2.2.3
+numpy>=1.17,<2
+
+# Vector databases
+faiss-cpu==1.8.0
+
+# Audio processing
+pydub==0.25.1
+
+# Docker integration
+docker==7.0.0
+
+# Database
+sqlalchemy==2.0.23
+
+# Transformers
+transformers==4.49.0
+
+# Дополнительные утилиты
+ffmpeg-python==0.2.0

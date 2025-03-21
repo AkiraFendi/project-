@@ -1,56 +1,74 @@
 import os
+import argparse
 from dotenv import load_dotenv
-from argparse import ArgumentParser
+from speechkit import model_repository, configure_credentials, creds
+from speechkit.stt import AudioProcessingType
 
 # Загрузка переменных окружения
 load_dotenv()
 
-os.environ["PATH"] += os.pathsep + "C:/Users/Admin/Desktop/ffmpeg-2025-03-13-git-958c46800e-full_build/bin"
-
-from speechkit import model_repository, configure_credentials, creds
-from speechkit.stt import AudioProcessingType
-
+# Настройка SpeechKit
 configure_credentials(
     yandex_credentials=creds.YandexCredentials(
         api_key=os.getenv("YANDEX_API_KEY")
     )
 )
 
-def recognize(audio_path):
+model = model_repository.recognition_model()
+model.model = 'general'
+model.language = 'ru-RU'
+model.audio_processing_type = AudioProcessingType.Full
+
+# Функция для нормализации текста
+MATH_REPLACEMENTS = {
+    "икс": "x",
+    "игрек": "y",
+    "зет": "z",
+    "плюс": "+",
+    "минус": "-",
+    "умножить на": "*",
+    "разделить на": "/",
+    "равно": "=",
+    "скобка открывается": "(",
+    "скобка закрывается": ")",
+    "в степени": "^"
+}
+
+
+def normalize_math_text(text: str) -> str:
+    text = text.lower()
+    for word, symbol in MATH_REPLACEMENTS.items():
+        text = text.replace(word, symbol)
+    return text.strip()
+
+
+def recognize(audio_path: str) -> str:
     try:
-        # Проверяем существование файла
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Аудиофайл не найден: {audio_path}")
-
-        # Настройка модели распознавания
-        model = model_repository.recognition_model()
-        model.model = 'general'  # Модель для общего распознавания
-        model.language = 'ru-RU'  # Язык аудио
-        model.audio_processing_type = AudioProcessingType.Full  # Полное распознавание
-
-        # Запуск распознавания
         result = model.transcribe_file(audio_path)
 
-        # Вывод результатов
-        for channel, res in enumerate(result):
-            print('=' * 80)
-            print(f'Канал: {channel}')
-            print(f'Исходный текст:\n{res.raw_text}\n')
-            print(f'Нормализованный текст:\n{res.normalized_text}\n')
+        normalized_text = ""
+        for res in result:
+            if res.normalized_text:
+                normalized_text = res.normalized_text
+                break  # Берем первый распознанный текст
 
-            if res.has_utterances():
-                print('Фразы:')
-                for utterance in res.utterances:
-                    print(f'- {utterance}')
+        if not normalized_text:
+            print("Ошибка: не удалось распознать речь")
+            return ""
+
+        normalized_text = normalize_math_text(normalized_text)
+        print(f"Распознанный текст: {normalized_text}")
+        return normalized_text
 
     except Exception as e:
         print(f"Ошибка: {str(e)}")
-        exit(1)
+        return ""
+
 
 if __name__ == '__main__':
-    parser = ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument('--audio', type=str, required=True, help='Путь к аудиофайлу')
     args = parser.parse_args()
-
-    recognize(args.audio)
-
+    result = recognize(args.audio)
+    if result:
+        print(f"Финальный текст: {result}")
