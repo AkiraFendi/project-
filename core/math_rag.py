@@ -167,6 +167,9 @@ class MathRAG:
         logger.info("Создана новая векторная БД")
 
     def solve_problem(self, query: str, lang: str = "ru") -> Dict[str, Any]:
+        logger.debug(f"Raw input query: {query}")
+
+
         """Основной метод решения математических задач"""
         try:
             query = self._normalize_input(query)
@@ -194,13 +197,16 @@ class MathRAG:
             return self._error_response("general", lang)
 
     def _solve_equation(self, query: str, lang: str) -> Dict[str, Any]:
-        """Решение уравнений"""
         try:
             equation = self._parse_equation(query, lang)
             solution = solve(equation, self.x)
 
             if not solution:
                 return self._error_response("no_solution", lang)
+
+            # Проверка численного решения
+            if not all(s.is_real for s in solution):
+                return self._error_response("complex_solution", lang)
 
             steps = [
                 f"{self.LOCALES[lang]['equation']['original']}: {latex(equation)}",
@@ -279,15 +285,19 @@ class MathRAG:
             return self._error_response("general", lang)
 
     def _parse_equation(self, query: str, lang: str) -> Equality:
-        """Парсинг уравнений"""
         try:
-            expr = query.split(";")[0].strip()
-            for kw in ["реши", "solve", "уравнение", "equation"]:
-                expr = expr.replace(kw, "")
-            lhs, rhs = expr.split("=", 1)
+            # Удаляем ключевые слова и лишние пробелы
+            query = ' '.join(query.replace("уравнение", "").replace("equation", "").split()).strip()
+
+            # Разделяем с учетом разных форматов равенства
+            if 'равно' in query:
+                lhs, rhs = query.split('равно', 1)
+            else:
+                lhs, rhs = query.split('=', 1)
+
             return Eq(
-                parse_expr(lhs, transformations=transformations),
-                parse_expr(rhs, transformations=transformations)
+                parse_expr(lhs.strip(), transformations=transformations),
+                parse_expr(rhs.strip(), transformations=transformations)
             )
         except (ValueError, SympifyError) as e:
             raise ValueError(self._get_localized("errors.parse", lang).format(error=str(e)))
@@ -402,13 +412,14 @@ class MathRAG:
         return any(kw in query for kw in keywords) and "=" in query
 
     def _equation_code(self, equation: Equality, lang: str) -> str:
-        """Генерация кода для уравнений"""
-        return (
-            f"from sympy import symbols, Eq, solve\n"
-            f"x = symbols('x')\n"
-            f"eq = Eq({latex(equation.lhs)}, {latex(equation.rhs)})\n"
-            f"print(solve(eq, x)[0])"
-        )
+        return f"""# -*- coding: utf-8 -*-
+    from sympy import symbols, Eq, solve
+
+    x = symbols('x')
+    equation = Eq({equation.lhs.evalf()}, {equation.rhs.evalf()})
+    solution = solve(equation, x)
+    print(solution[0] if solution else "Нет решения")
+    """
 
     def _is_derivative(self, query: str) -> bool:
         """Проверка на производную"""

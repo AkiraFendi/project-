@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 import sqlite3
+import asyncio
+from core.speech_recognizer import normalize_math_text
 from telegram import Update, User, Message
 from sqlite3 import Error as SqliteError
 from datetime import datetime
@@ -94,7 +96,7 @@ LOCALES = {
         "voice_recognition_error": "❌ Не удалось распознать речь",
         "audio_conversion_error": "Ошибка конвертации аудио",
         "error_prefix": "Ошибка",
-        "solution_steps": "Пошаговое решение",
+        "steps": "Пошаговое решение",
         "result": "Результат",
         "code": "Код",
         "empty_message_error": "Пожалуйста, отправьте текстовое или голосовое сообщение с задачей",
@@ -311,7 +313,8 @@ class TelegramBot:
 
                 # Обработка голосовых сообщений
             if message.voice:
-                return await self.handle_voice(message, user)
+                await self.handle_voice(message, user)
+                return
 
             # Получаем текст сообщения
             query = message.text.strip()
@@ -365,12 +368,11 @@ class TelegramBot:
         return "\n\n".join(parts)
 
     def _get_user_language(self, user_id: int) -> str:
-        """Получение языка пользователя из БД"""
         cursor = self.conn.cursor()
         cursor.execute('SELECT language FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
+        cursor.close()  # Добавить закрытие курсора
         return result[0] if result else 'ru'
-
 
     async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -533,16 +535,14 @@ class TelegramBot:
                 await voice.download_to_drive(tmp_path)
                 converted_path = await self._convert_audio(tmp_path)
                 recognized_text = self._recognize_voice(converted_path)
-
                 if recognized_text:
+                    normalized_text = normalize_math_text(recognized_text)
                     await self._process_text_message(
                         chat_id=message.chat_id,
-                        text=recognized_text,
+                        text=normalized_text,  # Используем нормализованный текст
                         user=user,
                         original_message=message
                     )
-                else:
-                    await message.reply_text(self._get_text(user.id, "voice_recognition_error"))
 
             except Exception as e:
                 logger.error(f"Voice processing error: {str(e)}")
@@ -560,21 +560,19 @@ class TelegramBot:
 
     async def _process_text_message(self, chat_id: int, text: str, user: User, original_message: Message):
         try:
-            # Проверяем на наличие битых символов
-            if not text.isascii():
-                text = text.encode('utf-8', 'ignore').decode('utf-8')
-
             self._log_query(user.id, text)
-            result = self.rag.solve_problem(text)
+            logger.info(f"Processing text: {text}")
 
-            if "error" in result:
-                await original_message.reply_text(f"❌ {self._get_text(user.id, 'error_prefix')}: {result['error']}")
-                return
+            # Получаем язык пользователя
+            lang = self._get_user_language(user.id)  # <-- Добавлено получение языка
 
-            response = self._format_response(user.id, result)
+            # Передаем язык в solve_problem
+            result = self.rag.solve_problem(text, lang=lang)
+
+            # Добавляем lang в вызов _format_response
+            response = self._format_response(user.id, result, lang)  # <-- Исправлено здесь
             await original_message.reply_markdown_v2(response)
             self._log_response(user.id, text, response)
-
         except Exception as e:
             logger.error(f"Text processing error: {str(e)}")
             await original_message.reply_text(self._get_text(user.id, "internal_error"))
@@ -591,11 +589,23 @@ class TelegramBot:
         ]
 
         try:
-            subprocess.run(command, check=True, capture_output=True)
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                logger.error(f"FFmpeg error: {stderr.decode()}")
+                raise RuntimeError(self._get_text(None, "audio_conversion_error"))
+
             return output_path
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Audio conversion error: {e.stderr.decode()}")
-            raise RuntimeError(self._get_text(None, "audio_conversion_error"))
+
+        except Exception as e:
+            logger.error(f"Audio conversion failed: {str(e)}")
+            raise
 
     def _recognize_voice(self, file_path: str) -> str:
         try:
