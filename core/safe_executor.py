@@ -34,18 +34,16 @@ class SafeExecutor:
 
     def _validate_code(self, code: str):
         """Проверка кода на опасные конструкции"""
-        # Проверка синтаксиса
+
         try:
             ast.parse(code)
         except SyntaxError as e:
             raise SecurityError(f"Синтаксическая ошибка: {str(e)}")
 
-        # Проверка ключевых слов
         for kw in self.blocked_keywords:
             if kw in code:
                 raise SecurityError(f"Обнаружено запрещенное ключевое слово: {kw}")
 
-        # Проверка импортов
         parsed = ast.parse(code)
         for node in ast.walk(parsed):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -62,7 +60,6 @@ class SafeExecutor:
         try:
             self._validate_code(code)
 
-            # Добавляем обязательные импорты
             header = (
                 "# -*- coding: utf-8 -*-\n"
                 "from sympy import *\n"
@@ -71,7 +68,6 @@ class SafeExecutor:
             )
             code = header + code
 
-            # Создаем временный файл
             with tempfile.NamedTemporaryFile(
                 mode='w', suffix='.py', delete=False, encoding='utf-8'
             ) as f:
@@ -79,7 +75,6 @@ class SafeExecutor:
                 temp_path = f.name
                 logger.info(f"Создан временный файл: {temp_path}")
 
-            # Конфигурация Docker-контейнера
             container_config = {
                 'image': 'python:3.9-slim',
                 'command': f"timeout {self.timeout} python /tmp/{os.path.basename(temp_path)}",
@@ -105,7 +100,6 @@ class SafeExecutor:
             except ReadTimeout:
                 raise TimeoutError(f"Превышено время ожидания ({self.timeout} сек)")
 
-            # Обработка результатов
             if exit_code != 0:
                 result.update({
                     "status": "error",
@@ -129,7 +123,7 @@ class SafeExecutor:
         except Exception as e:
             result.update({"status": "error", "type": "unknown", "message": f"Неизвестная ошибка: {str(e)}"})
         finally:
-            # Очистка временных файлов
+
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.unlink(temp_path)
@@ -137,7 +131,6 @@ class SafeExecutor:
                 except Exception as e:
                     logger.error(f"Ошибка удаления файла: {str(e)}")
 
-            # Остановка контейнера
             if container:
                 try:
                     container.stop(timeout=1)

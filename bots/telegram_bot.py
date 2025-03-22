@@ -328,21 +328,17 @@ class TelegramBot:
 
             await self._register_user(user)
 
-            # Проверяем статус уведомлений
             if not self._check_notifications(user.id):
                 logger.info(f"Notifications disabled for user {user.id}, ignoring message")
                 return
 
-                # Обработка голосовых сообщений
             if message.voice:
                 await self.handle_voice(message, user)
                 return
 
-            # Получаем текст сообщения
             query = message.text.strip()
             lang = self._get_user_language(user.id)
 
-            # Логируем полученный запрос
             logger.info(f"Received query: {query} from user {user.id}")
 
             result = self.rag.solve_problem(query, lang=lang)
@@ -363,7 +359,6 @@ class TelegramBot:
 
     def _format_response(self, user_id: int, result: dict, lang: str) -> str:
         def escape(text: str) -> str:
-            # Экранируем всё, кроме LaTeX-формул
             return escape_markdown(text, version=2).replace(r"\(", "$").replace(r"\)", "$")
 
         parts = []
@@ -432,62 +427,70 @@ class TelegramBot:
 
     async def report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        args = context.args if context.args else []
-        lang = self._get_user_language(user.id)  # Получаем язык пользователя
+        args = context.args if context.args else []  # Получаем аргументы команды
+        logger.info(f"/report вызван пользователем {user.id}, args: {args}")
 
-        # Если передан пароль разработчика
+        cursor = self.conn.cursor()
+
         if args and args[0] == self.dev_password:
-            cursor = self.conn.cursor()
             cursor.execute("SELECT user_id, problem, created_at FROM reports ORDER BY created_at DESC")
             reports = cursor.fetchall()
 
             if not reports:
-                no_reports_msg = self._get_text(user.id, "history_empty")  # Используем существующий ключ
-                await update.message.reply_text(no_reports_msg)
-                return
+                await update.message.reply_text("📭 Нет новых сообщений в поддержку.")
+                return ConversationHandler.END
 
             response = []
             for idx, (user_id, problem, date) in enumerate(reports, 1):
-                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                item = [
-                    f"{idx}. ⏱ {date_str}",
-                    f"👤 User ID: {user_id}",
-                    f"📝 {problem[:100]}"
-                ]
-                response.append("\n".join(item))
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d\\.%m\\.%Y %H:%M')
+                safe_problem = escape_markdown(problem[:100], version=2)
+                response.append(f"{idx}\\. ⏱ `{date_str}`\n👤 {user_id}\n📝 {safe_problem}")
 
-            header = self._get_text(user.id, "history_header")  # Локализованный заголовок
-            await update.message.reply_text(f"{header}:\n\n" + "\n\n".join(response))
-            return
+            await update.message.reply_markdown_v2("*📨 Жалобы пользователей:*\n\n" + "\n\n".join(response))
+            return ConversationHandler.END
 
-        # Запрос описания проблемы у пользователя
-        prompt = self._get_text(user.id, "report_prompt")
-        await update.message.reply_text(prompt)
+        await update.message.reply_text("📝 Опишите вашу проблему:")
         context.user_data["awaiting_report"] = True
+        return 1
 
     async def handle_user_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        lang = self._get_user_language(user.id)  # Язык пользователя
+        message = update.message
 
         if not context.user_data.get("awaiting_report", False):
-            return
+            return ConversationHandler.END
 
-        problem_text = update.message.text.strip()
+        problem_text = message.text.strip()
         if not problem_text:
             error_msg = self._get_text(user.id, "report_error")
-            await update.message.reply_text(error_msg)
-            return
+            await message.reply_text(error_msg)
+            return 1  # Остаёмся в этом же состоянии
 
-        # Сохранение в базу данных
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO reports (user_id, problem, created_at) VALUES (?, ?, ?)",
-            (user.id, problem_text, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        self.conn.commit()
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT INTO reports (user_id, problem, created_at) VALUES (?, ?, ?)",
+                (user.id, problem_text, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            )
+            self.conn.commit()
+            cursor.close()
 
-        success_msg = self._get_text(user.id, "report_success")
-        await update.message.reply_text(success_msg)
-        context.user_data["awaiting_report"] = False
+            logger.info(f"Report successfully saved from user {user.id}")
+            success_msg = self._get_text(user.id, "report_success")
+            await message.reply_text(success_msg)
+
+        except sqlite3.Error as e:
+            logger.error(f"Database error while saving report: {str(e)}")
+            await message.reply_text(self._get_text(user.id, "internal_error"))
+
+        except Exception as e:
+            logger.error(f"Unexpected error in handle_user_report: {str(e)}", exc_info=True)
+            await message.reply_text(self._get_text(user.id, "internal_error"))
+
+        finally:
+            context.user_data["awaiting_report"] = False
+
+        return ConversationHandler.END
 
     def _log_query(self, user_id: int, query: str):
         try:
@@ -772,7 +775,7 @@ class TelegramBot:
             logger.info("Starting bot...")
             app = ApplicationBuilder().token(self.token).build()
 
-            # Создаем ConversationHandler для /report
+
             report_conv_handler = ConversationHandler(
                 entry_points=[CommandHandler("report", self.report)],
                 states={

@@ -180,16 +180,12 @@ class MathRAG:
     def _normalize_input(self, text: str) -> str:
         """Нормализация математических выражений"""
         replacements = [
-            # Тригонометрия: sin x → sin(x)
             (r'\b(sin|cos|tan|cot|sec|csc)\s+(\w+)', r'\1(\2)'),
 
-            # Пределы: lim x->0 (expr) → limit(expr, x, 0)
             (r'lim\s+([a-zA-Z]+)\s*->\s*([\d.]+)\s*\((.*)\)', r'limit(\3, \1, \2)'),
 
-            # Умножение: 3x → 3*x
             (r'(\d)([a-zA-Z])', r'\1*\2'),
 
-            # Спецсимволы
             (r'\^', '**'), (r'÷', '/'), (r'×', '*'),
             (r'[–−]', '-'), (r'\s+', '')
         ]
@@ -208,7 +204,6 @@ class MathRAG:
             if not query:
                 return self._error_response("empty_query", lang)
 
-            # Обработка простых вычислений
             try:
                 expr = sympify(query, evaluate=False)
                 if expr.is_Number or not expr.free_symbols:
@@ -217,17 +212,15 @@ class MathRAG:
             except SympifyError:
                 pass
 
-            # Определение типа задачи
             if self._is_equation(query):
                 return self._solve_equation(query, lang)
             if self._is_derivative(query):
                 return self._solve_derivative(query, lang)
             if self._is_integral(query):
                 return self._solve_integral(query, lang)
-            if self._is_limit(query):  # Новая проверка для пределов
+            if self._is_limit(query):
                 return self._solve_limit(query, lang)
 
-            # Общее решение через RAG
             return self._solve_general(query, lang)
 
         except SecurityError as e:
@@ -324,16 +317,13 @@ class MathRAG:
             equation = self._parse_equation(query, lang)
             logger.info(f"Уравнение после парсинга: {latex(equation)}")
 
-            # Решение с учетом периодичности для тригонометрии
             solution = solve(equation, self.x, domain=S.Reals, check=False)
 
-            # Фильтрация комплексных решений
             real_solutions = [s for s in solution if s.is_real and not s.has(S.ComplexInfinity)]
 
             if not real_solutions:
                 return self._error_response("no_solution", lang)
 
-            # Форматирование с символьными константами
             solutions_str = ", ".join([f"x = {self._format_symbolic(s)}" for s in real_solutions])
 
             steps = [
@@ -358,17 +348,15 @@ class MathRAG:
 
     def _parse_equation(self, query: str, lang: str) -> Equality:
         try:
-            # Удаление ключевых слов на русском и английском
+
             keywords = ["решить", "уравнение", "solve", "equation"]
             for kw in keywords:
                 query = query.replace(kw, "")
             query = query.strip()
 
-            # Проверка наличия знака равенства
             if '=' not in query:
                 raise ValueError("Уравнение должно содержать знак '='")
 
-            # Разделение на левую и правую части
             lhs, rhs = query.split('=', 1)
             lhs_expr = parse_expr(lhs.strip(), transformations=transformations)
             rhs_expr = parse_expr(rhs.strip(), transformations=transformations)

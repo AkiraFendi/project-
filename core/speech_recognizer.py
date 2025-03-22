@@ -4,10 +4,8 @@ from dotenv import load_dotenv
 from speechkit import model_repository, configure_credentials, creds
 from speechkit.stt import AudioProcessingType
 
-# Загрузка переменных окружения
 load_dotenv()
 
-# Настройка SpeechKit
 configure_credentials(
     yandex_credentials=creds.YandexCredentials(
         api_key=os.getenv("YANDEX_API_KEY")
@@ -19,7 +17,6 @@ model.model = 'general'
 model.language = 'ru-RU'
 model.audio_processing_type = AudioProcessingType.Full
 
-# Функция для нормализации текста
 MATH_REPLACEMENTS = {
     "икс": "x",
     "икса": "x",
