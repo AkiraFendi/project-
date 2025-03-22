@@ -37,6 +37,12 @@ class MathRAG:
                 "simplified": "Упрощенная форма",
                 "solution": "Решение"
             },
+            "limit": {
+                "original": "Исходный предел",
+                "solution": "Результат предела",
+                "original": "Исходный предел",
+                "solution": "Предел при"
+            },
             "derivative": {
                 "function": "Исходная функция",
                 "derivative": "Производная"
@@ -63,6 +69,12 @@ class MathRAG:
                 "original": "Original equation",
                 "simplified": "Simplified form",
                 "solution": "Solution"
+            },
+            "limit": {
+                "original": "Original limit",
+                "solution": "Limit result",
+                "original": "Original limit",
+                "solution": "Limit as"
             },
             "derivative": {
                 "function": "Original function",
@@ -167,20 +179,24 @@ class MathRAG:
 
     def _normalize_input(self, text: str) -> str:
         """Нормализация математических выражений"""
-        replacements = (
-            ('^', '**'),
-            ('÷', '/'),
-            ('×', '*'),
-            ('–', '-'),
-            ('−', '-'),
-            ('\\', ''),
-            ('‘', "'"),
-            ('’', "'"),
-            ('`', "'")
-        )
-        for old, new in replacements:
-            text = text.replace(old, new)
-        text = re.sub(r'(\d+)([a-zA-Z]+)', r'\1*\2', text)  # 3x → 3*x
+        replacements = [
+            # Тригонометрия: sin x → sin(x)
+            (r'\b(sin|cos|tan|cot|sec|csc)\s+(\w+)', r'\1(\2)'),
+
+            # Пределы: lim x->0 (expr) → limit(expr, x, 0)
+            (r'lim\s+([a-zA-Z]+)\s*->\s*([\d.]+)\s*\((.*)\)', r'limit(\3, \1, \2)'),
+
+            # Умножение: 3x → 3*x
+            (r'(\d)([a-zA-Z])', r'\1*\2'),
+
+            # Спецсимволы
+            (r'\^', '**'), (r'÷', '/'), (r'×', '*'),
+            (r'[–−]', '-'), (r'\s+', '')
+        ]
+
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text)
+
         return text.strip()
 
     def solve_problem(self, query: str, lang: str = "ru") -> Dict[str, Any]:
@@ -201,12 +217,17 @@ class MathRAG:
             except SympifyError:
                 pass
 
+            # Определение типа задачи
             if self._is_equation(query):
                 return self._solve_equation(query, lang)
             if self._is_derivative(query):
                 return self._solve_derivative(query, lang)
             if self._is_integral(query):
                 return self._solve_integral(query, lang)
+            if self._is_limit(query):  # Новая проверка для пределов
+                return self._solve_limit(query, lang)
+
+            # Общее решение через RAG
             return self._solve_general(query, lang)
 
         except SecurityError as e:
@@ -215,6 +236,66 @@ class MathRAG:
         except Exception as e:
             logger.error(f"Неожиданная ошибка: {str(e)}", exc_info=True)
             return self._error_response("general", lang)
+
+    def _is_limit(self, query: str) -> bool:
+        keywords = ["lim", "предел", "limit"]
+        return any(kw in query.lower() for kw in keywords)
+
+    def _solve_limit(self, query: str, lang: str) -> Dict[str, Any]:
+        try:
+            # Парсинг выражения предела
+            match = re.match(r"limit\((.*),\s*([a-zA-Z]+),\s*([\d.]+)\)", query)
+            if not match:
+                raise ValueError("Некорректный формат предела")
+
+            expr_str, var_str, point_str = match.groups()
+            var = symbols(var_str)
+            point = float(point_str)
+            expr = parse_expr(expr_str, transformations=transformations)
+
+            limit_result = expr.limit(var, point)
+
+            steps = [
+                f"{self.LOCALES[lang]['limit']['original']}: {latex(expr)}",
+                f"{self.LOCALES[lang]['limit']['solution']} {var} → {point}: {latex(limit_result)}"
+            ]
+
+            return {
+                "result": latex(limit_result),
+                "formatted_steps": "\n".join(steps),
+                "code": self._limit_code(expr, var, point, lang),
+                "lang": lang
+            }
+        except Exception as e:
+            return self._error_response("parse", lang, error=str(e))
+
+    def _parse_limit(self, query: str) -> tuple:
+        """Парсинг выражения предела"""
+        try:
+            # Ищем паттерн limit(var, point)(expr)
+            match = re.match(r"limit\((\w+),\s*([\d.]+)\)(.*)", query)
+            if not match:
+                raise ValueError("Некорректный формат предела")
+
+            var_str = match.group(1)
+            point = float(match.group(2))
+            expr_str = match.group(3).strip()
+
+            var = symbols(var_str)
+            expr = parse_expr(expr_str, transformations=transformations)
+
+            return expr, var, point
+        except Exception as e:
+            raise ValueError(f"Ошибка парсинга: {str(e)}")
+
+    def _limit_code(self, expr, var, point, lang: str) -> str:
+        """Генерация корректного кода для пределов"""
+        return f"""# -*- coding: utf-8 -*-
+    from sympy import symbols, limit
+
+    {var} = symbols('{var}')
+    print(limit({latex(expr)}, {var}, {point}))"""
+
 
     def _format_simple_calculation(self, query: str, result: Any, lang: str) -> Dict[str, Any]:
         formatted_result = self._format_number(result)
@@ -240,34 +321,23 @@ class MathRAG:
 
     def _solve_equation(self, query: str, lang: str) -> Dict[str, Any]:
         try:
-            if '=' not in query:
-                raise ValueError("Уравнение должно содержать знак '='")
-
-            # Парсинг уравнения
             equation = self._parse_equation(query, lang)
-            logger.info(f"Уравнение после парсинга: {equation}")  # Логирование
+            logger.info(f"Уравнение после парсинга: {latex(equation)}")
 
-            # Решение уравнения с явным указанием действительной области
-            solution = solve(equation, self.x, domain=S.Reals)
-            logger.info(f"Найденные корни: {solution}")  # Логирование
+            # Решение с учетом периодичности для тригонометрии
+            solution = solve(equation, self.x, domain=S.Reals, check=False)
 
-            # Фильтрация действительных корней
-            real_solutions = []
-            for s in solution:
-                # Явная проверка типа и значения
-                if s.is_real and not s.has(S.ComplexInfinity):
-                    real_solutions.append(s)
-                else:
-                    logger.warning(f"Отфильтрован корень: {s}")
+            # Фильтрация комплексных решений
+            real_solutions = [s for s in solution if s.is_real and not s.has(S.ComplexInfinity)]
 
             if not real_solutions:
-                return self._error_response("complex_solution", lang)
+                return self._error_response("no_solution", lang)
 
-            # Форматирование результата
-            solutions_str = ", ".join([f"x = {self._format_number(s)}" for s in real_solutions])
+            # Форматирование с символьными константами
+            solutions_str = ", ".join([f"x = {self._format_symbolic(s)}" for s in real_solutions])
+
             steps = [
                 f"{self.LOCALES[lang]['equation']['original']}: {latex(equation)}",
-                f"{self.LOCALES[lang]['equation']['simplified']}: {latex(equation.lhs - equation.rhs)} = 0",
                 f"{self.LOCALES[lang]['equation']['solution']}: {solutions_str}"
             ]
 
@@ -279,6 +349,12 @@ class MathRAG:
             }
         except (SympifyError, ValueError) as e:
             return self._error_response("parse", lang, error=str(e))
+
+    def _format_symbolic(self, expr):
+        """Форматирование символьных констант"""
+        from sympy import pi, E
+        replacements = {pi: 'π', E: 'e'}
+        return replacements.get(expr, latex(expr))
 
     def _parse_equation(self, query: str, lang: str) -> Equality:
         try:
@@ -302,13 +378,14 @@ class MathRAG:
             raise ValueError(self.LOCALES[lang]["errors"]["parse"].format(error=str(e)))
 
     def _equation_code(self, equation: Equality, lang: str) -> str:
+        """Исправленный код для уравнений"""
         return f"""# -*- coding: utf-8 -*-
-from sympy import symbols, Eq, solve
+    from sympy import symbols, Eq, solve
 
-x = symbols('x')
-equation = Eq({latex(equation.lhs)}, {latex(equation.rhs)})
-solution = solve(equation, x)
-print(solution[0] if solution else "{self.LOCALES[lang]['errors']['no_solution']}")"""
+    x = symbols('x')
+    equation = Eq({latex(equation.lhs)}, {latex(equation.rhs)})
+    solution = solve(equation, x)
+    print(solution)"""
 
     def _is_derivative(self, query: str) -> bool:
         keywords = ["производн", "derivative", "diff"]

@@ -20,7 +20,8 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    ConversationHandler
 )
 from telegram.error import BadRequest
 from speechkit import model_repository, configure_credentials, creds
@@ -61,6 +62,7 @@ LOCALES = {
         /help \\- справка
         /history \\- история запросов
         /settings \\- настройки
+        /report \\- сообщить о проблеме
         """,
         "help": """
         📖 \\*Справка по использованию бота\\*
@@ -100,6 +102,10 @@ LOCALES = {
         "result": "Результат",
         "code": "Код",
         "empty_message_error": "Пожалуйста, отправьте текстовое или голосовое сообщение с задачей",
+        "report_cmd": "сообщить о проблеме",
+        "report_prompt": "📝 Опишите вашу проблему:",
+        "report_success": "✅ Ваша жалоба отправлена!",
+        "report_error": "⚠️ Пожалуйста, опишите вашу проблему текстом."
     },
     "en": {
         "start": """
@@ -122,6 +128,7 @@ LOCALES = {
         /help \\- Help
         /history \\- Query history
         /settings \\- Settings
+        /report \\- Report an issue
         """,
         "help": """
         📖 \\*Usage Help\\*
@@ -161,6 +168,10 @@ LOCALES = {
         "result": "Result",
         "code": "Code",
         "empty_message_error": "Please send a text or voice message with your problem",
+        "report_cmd": "report an issue",
+        "report_prompt": "📝 Describe your issue:",
+        "report_success": "✅ Your report has been submitted!",
+        "report_error": "⚠️ Please describe your problem in text."
     }
 }
 
@@ -169,11 +180,13 @@ class TelegramBot:
     def __init__(self):
         self.token = os.getenv("TELEGRAM_TOKEN")
         self.yandex_key = os.getenv("YANDEX_API_KEY")
+        self.dev_password = os.getenv("DEV_PASSWORD")
 
-        if not all([self.token, self.yandex_key]):
+        if not all([self.token, self.yandex_key, self.dev_password]):
             missing = []
             if not self.token: missing.append("TELEGRAM_TOKEN")
             if not self.yandex_key: missing.append("YANDEX_API_KEY")
+            if not self.dev_password: missing.append("DEV_PASSWORD")
             raise ValueError(f"Missing required env vars: {', '.join(missing)}")
 
         self.rag = MathRAG()
@@ -208,6 +221,15 @@ class TelegramBot:
                     response TEXT,
                     created_at DATETIME,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    problem TEXT,
+                    created_at DATETIME
                 )
             ''')
 
@@ -373,7 +395,7 @@ class TelegramBot:
         user = update.effective_user
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT query, response, created_at 
+            SELECT query, created_at 
             FROM history 
             WHERE user_id = ?
             ORDER BY created_at DESC 
@@ -387,34 +409,85 @@ class TelegramBot:
             return
 
         response = []
-        for idx, (query, resp, date) in enumerate(history_records, 1):
+        for idx, (query, date) in enumerate(history_records, 1):
             try:
-                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d\\.%m %H\\:%M')
-                escaped_query = escape_markdown(query[:50], version=2)
-                escaped_response = escape_markdown(resp[:100], version=2) if resp else ""
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime(
+                    '%d\\.%m\\.%Y %H:%M')  # Экранируем точки
+
+                safe_query = escape_markdown(query[:50], version=2)
 
                 item = [
-                    f"{escape_markdown(str(idx), version=2)}\\.",
-                    f"▶️ *{self._get_text(user.id, 'history_query')}*: `{escaped_query}`",
-                    f"◀️ *{self._get_text(user.id, 'history_response')}*: `{escaped_response}`" if resp else ""
+                    f"{escape_markdown(str(idx), version=2)}\\. ⏱ `{date_str}`",
+                    f"▶️ *{escape_markdown('Запрос', version=2)}*: `{safe_query}`"
                 ]
-                response.append("\n".join(filter(None, item)))
+                response.append("\n".join(item))
 
             except Exception as e:
-                logger.error(f"Error formatting history item: {str(e)}")
+                logger.error(f"Ошибка форматирования: {str(e)}")
 
-        header = self._get_text(user.id, "history_header")
-        try:
-            await update.message.reply_markdown_v2(
-                f"{escape_markdown(header, version=2)}:\n\n" +
-                "\n\n".join(response)
-            )
-        except BadRequest as e:
-            logger.error(f"Markdown error: {str(e)}")
-            await update.message.reply_text(
-                "📜 History:\n" +
-                "\n".join([item.replace('*', '').replace('_', '') for item in response])
-            )
+        header = escape_markdown(self._get_text(user.id, "history_header"), version=2)
+        await update.message.reply_markdown_v2(
+            f"*{header}:*\n\n" + "\n\n".join(response)
+        )
+
+    async def report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        args = context.args if context.args else []
+        lang = self._get_user_language(user.id)  # Получаем язык пользователя
+
+        # Если передан пароль разработчика
+        if args and args[0] == self.dev_password:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT user_id, problem, created_at FROM reports ORDER BY created_at DESC")
+            reports = cursor.fetchall()
+
+            if not reports:
+                no_reports_msg = self._get_text(user.id, "history_empty")  # Используем существующий ключ
+                await update.message.reply_text(no_reports_msg)
+                return
+
+            response = []
+            for idx, (user_id, problem, date) in enumerate(reports, 1):
+                date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                item = [
+                    f"{idx}. ⏱ {date_str}",
+                    f"👤 User ID: {user_id}",
+                    f"📝 {problem[:100]}"
+                ]
+                response.append("\n".join(item))
+
+            header = self._get_text(user.id, "history_header")  # Локализованный заголовок
+            await update.message.reply_text(f"{header}:\n\n" + "\n\n".join(response))
+            return
+
+        # Запрос описания проблемы у пользователя
+        prompt = self._get_text(user.id, "report_prompt")
+        await update.message.reply_text(prompt)
+        context.user_data["awaiting_report"] = True
+
+    async def handle_user_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        lang = self._get_user_language(user.id)  # Язык пользователя
+
+        if not context.user_data.get("awaiting_report", False):
+            return
+
+        problem_text = update.message.text.strip()
+        if not problem_text:
+            error_msg = self._get_text(user.id, "report_error")
+            await update.message.reply_text(error_msg)
+            return
+
+        # Сохранение в базу данных
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO reports (user_id, problem, created_at) VALUES (?, ?, ?)",
+            (user.id, problem_text, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        self.conn.commit()
+
+        success_msg = self._get_text(user.id, "report_success")
+        await update.message.reply_text(success_msg)
+        context.user_data["awaiting_report"] = False
 
     def _log_query(self, user_id: int, query: str):
         try:
@@ -427,25 +500,23 @@ class TelegramBot:
             self.conn.commit()
         except Exception as e:
             logger.error(f"Error logging query: {str(e)}")
+        finally:
+            cursor.close()
 
     def _log_response(self, user_id: int, query: str, response: str):
         try:
             cursor = self.conn.cursor()
+            # Вставляем новую запись вместо обновления
             cursor.execute('''
-                UPDATE history 
-                SET response = ?
-                WHERE user_id = ? 
-                AND id = (
-                    SELECT id 
-                    FROM history 
-                    WHERE user_id = ? 
-                    ORDER BY created_at DESC 
-                    LIMIT 1
-                )
-            ''', (response, user_id, user_id))
+                INSERT INTO history 
+                (user_id, query, response, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, query[:500], response, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             self.conn.commit()
         except Exception as e:
             logger.error(f"Error logging response: {str(e)}")
+        finally:
+            cursor.close()
 
     async def settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -701,11 +772,21 @@ class TelegramBot:
             logger.info("Starting bot...")
             app = ApplicationBuilder().token(self.token).build()
 
+            # Создаем ConversationHandler для /report
+            report_conv_handler = ConversationHandler(
+                entry_points=[CommandHandler("report", self.report)],
+                states={
+                    1: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_user_report)]
+                },
+                fallbacks=[]
+            )
+
             handlers = [
                 CommandHandler("start", self.start),
                 CommandHandler("help", self.help),
                 CommandHandler("history", self.history),
                 CommandHandler("settings", self.settings),
+                report_conv_handler,  # Добавляем обработчик диалога
                 MessageHandler(filters.VOICE, self.handle_voice),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message),
                 CallbackQueryHandler(self.settings_handler)
@@ -718,7 +799,7 @@ class TelegramBot:
             app.run_polling(
                 drop_pending_updates=True,
                 poll_interval=0.5,
-                allowed_updates=Update.ALL_TYPES
+                allowed_updates=None  # Исправлено: разрешаем все типы обновлений
             )
 
         except Exception as e:
