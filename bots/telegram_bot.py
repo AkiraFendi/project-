@@ -344,14 +344,14 @@ class TelegramBot:
             result = self.rag.solve_problem(query, lang=lang)
 
             if "error" in result:
-                error_msg = f"❌ {self._get_text(user.id, 'error_prefix')}: {result['error']}"
+                if "undefined" in result["error"].lower():
+                    help_text = self._get_text(user.id, "help")
+                    error_msg = f"{result['error']}\n\n{help_text}"
+                else:
+                    error_msg = f"❌ {self._get_text(user.id, 'error_prefix')}: {result['error']}"
+
                 await message.reply_text(error_msg)
                 return
-
-            response = self._format_response(user.id, result, lang)
-            await message.reply_markdown_v2(response)
-
-            self._log_response(user.id, query, response)
 
         except Exception as e:
             logger.error(f"Message handling error: {str(e)}", exc_info=True)

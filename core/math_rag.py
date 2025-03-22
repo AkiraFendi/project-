@@ -61,7 +61,8 @@ class MathRAG:
                 "parse": "Ошибка парсинга: {error}",
                 "no_solution": "Нет решения",
                 "complex_solution": "Комплексные решения не поддерживаются",
-                "general": "Ошибка решения"
+                "general": "Ошибка решения",
+                "undefined_query": "Не удалось распознать запрос. Пожалуйста, уточните ваш вопрос или предоставьте больше контекста."
             }
         },
         "en": {
@@ -94,7 +95,8 @@ class MathRAG:
                 "parse": "Parsing error: {error}",
                 "no_solution": "No solution",
                 "complex_solution": "Complex solutions not supported",
-                "general": "Solution error"
+                "general": "Solution error",
+                "undefined_query": "Unable to process your request. Please clarify your question or provide more context."
             }
         }
     }
@@ -221,7 +223,10 @@ class MathRAG:
             if self._is_limit(query):
                 return self._solve_limit(query, lang)
 
-            return self._solve_general(query, lang)
+            general_result = self._solve_general(query, lang)
+            if "error" in general_result:
+                return self._error_response("undefined_query", lang)
+            return general_result
 
         except SecurityError as e:
             logger.error(f"Нарушение безопасности: {str(e)}")
@@ -436,12 +441,14 @@ print(integrate('{expr_str}', x))""",
     def _solve_general(self, query: str, lang: str) -> Dict[str, Any]:
         try:
             examples = self.vector_db.similarity_search(query, k=3)
+            if not examples:
+                return self._error_response("undefined_query", lang)
             context = self._build_context(examples, lang)
             code = self._generate_code(query, context, lang)
             execution_result = self.executor.execute(code)
 
             if execution_result['status'] != 'success':
-                return {"error": execution_result['message']}
+                return self._error_response("undefined_query", lang)
 
             return {
                 "result": execution_result['result'],
