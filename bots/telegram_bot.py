@@ -30,8 +30,14 @@ from speechkit.stt import AudioProcessingType
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.math_rag import MathRAG
 from core.safe_executor import SafeExecutor
+import shutil
 
-load_dotenv()
+# Укажите путь к ffmpeg
+ffmpeg_path = "C:/Users/tomat/Documents/GitHub/project-/ffmpeg/bin/ffmpeg.exe"
+
+# Проверка наличия ffmpeg
+if not os.path.exists(ffmpeg_path):
+    raise RuntimeError(f"ffmpeg не найден по пути: {ffmpeg_path}")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -321,10 +327,13 @@ class TelegramBot:
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         message = update.message
-
+        result = None  # Инициализация переменной
         try:
             if await self.check_cooldown(update, context):
                 return
+
+            if result and ("integral" in result.get("result", "").lower() or "интеграл" in result.get("result", "").lower()):
+                response = self._format_integral_response(user.id, result, lang)
 
             await self._register_user(user)
 
@@ -583,73 +592,105 @@ class TelegramBot:
             message = update.effective_message
             logger.info(f"Получено голосовое сообщение от {user.id}")
 
-            # Добавляем логирование длительности
-            duration = message.voice.duration
-            logger.info(f"Длительность сообщения: {duration} сек")
+            # Проверка наличия сообщения и голосового файла
+            if not message or not message.voice:
+                logger.error("Некорректный объект сообщения")
+                return
 
-            # Проверяем статус уведомлений
+            # Проверка статуса уведомлений
             if not self._check_notifications(user.id):
                 logger.info(f"Ignoring voice message from {user.id} (notifications off)")
                 return
 
+            # Проверка длительности
             if message.voice.duration > 30:
                 await message.reply_text(self._get_text(user.id, "voice_too_long"))
                 return
 
-            voice = await message.voice.get_file()
+            # Скачивание и конвертация аудио
+            voice_file = await message.voice.get_file()
             tmp_path = tempfile.mktemp(suffix=".ogg")
             converted_path = None
 
             try:
-                await voice.download_to_drive(tmp_path)
+                await voice_file.download_to_drive(tmp_path)
                 converted_path = await self._convert_audio(tmp_path)
+                
+                # Проверка существования файла после конвертации
+                if not os.path.exists(converted_path):
+                    raise FileNotFoundError("Converted audio not found")
+
+                # Распознавание речи
                 recognized_text = self._recognize_voice(converted_path)
-                if recognized_text:
-                    normalized_text = normalize_math_text(recognized_text)
-                    await self._process_text_message(
-                        chat_id=message.chat_id,
-                        text=normalized_text,  # Используем нормализованный текст
-                        user=user,
-                        original_message=message
-                    )
+                if not recognized_text:
+                    raise ValueError("Пустой результат распознавания")
+
+                # Обработка текста
+                normalized_text = normalize_math_text(recognized_text)
+                await self._process_text_message(
+                    chat_id=message.chat_id,
+                    text=normalized_text,
+                    user=user,
+                    original_message=message
+                )
 
             except Exception as e:
-                logger.error(f"Voice processing error: {str(e)}")
-                await message.reply_text(self._get_text(user.id, "internal_error"))
+                logger.error(f"Ошибка обработки голоса: {str(e)}", exc_info=True)
+                await message.reply_text(self._get_text(user.id, "voice_recognition_error"))
 
             finally:
+                # Удаление временных файлов
                 for path in [tmp_path, converted_path]:
                     if path and os.path.exists(path):
-                        os.remove(path)
+                        try:
+                            os.remove(path)
+                        except Exception as e:
+                            logger.error(f"Ошибка удаления файла {path}: {str(e)}")
 
         except Exception as e:
-            logger.error(f"Critical voice error: {str(e)}")
-            if message:
-                await message.reply_text(self._get_text(user.id, "internal_error"))
+            logger.critical(f"Критическая ошибка в handle_voice: {str(e)}", exc_info=True)
+            if update.effective_message:
+                await update.effective_message.reply_text(self._get_text(user.id, "internal_error"))
 
     async def _process_text_message(self, chat_id: int, text: str, user: User, original_message: Message):
         try:
+            if not text.strip():
+                raise ValueError("Пустой текст после обработки")
+
             self._log_query(user.id, text)
-            logger.info(f"Processing text: {text}")
+            
+            # Добавьте логирование нормализованного текста
+            logger.info(f"Нормализованный текст: {text}")
 
-            # Получаем язык пользователя
-            lang = self._get_user_language(user.id)  # <-- Добавлено получение языка
-
-            # Передаем язык в solve_problem
+            lang = self._get_user_language(user.id)
             result = self.rag.solve_problem(text, lang=lang)
 
-            # Добавляем lang в вызов _format_response
-            response = self._format_response(user.id, result, lang)  # <-- Исправлено здесь
+            if "error" in result:
+                error_msg = f"❌ {self._get_text(user.id, 'error_prefix')}: {result['error']}"
+                await original_message.reply_text(error_msg)
+                return
+
+            # Проверка наличия результата
+            if not result.get("result"):
+                raise ValueError("Пустой результат решения")
+
+            response = self._format_response(user.id, result, lang)
+            
+            # Явная проверка длины сообщения
+            if len(response) < 5:
+                raise ValueError("Слишком короткий ответ")
+
             await original_message.reply_markdown_v2(response)
             self._log_response(user.id, text, response)
+
         except Exception as e:
-            logger.error(f"Text processing error: {str(e)}")
+            logger.error(f"Ошибка обработки: {str(e)}")
             await original_message.reply_text(self._get_text(user.id, "internal_error"))
 
     async def _convert_audio(self, input_path: str) -> str:
         output_path = input_path + ".wav"
         command = [
-            "ffmpeg",
+            ffmpeg_path,
             "-i", input_path,
             "-ar", "16000",
             "-ac", "1",

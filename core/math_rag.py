@@ -418,24 +418,56 @@ print(diff(expr, x))"""
 
     def _solve_integral(self, query: str, lang: str) -> Dict[str, Any]:
         try:
-            expr_str = query.split("от")[-1].strip()
-            expr = parse_expr(expr_str, transformations=transformations)
-            integral = integrate(expr, self.x)
+            # Нормализация запроса
+            query = query.replace(" ", "").lower()
+            
+            # Шаблон для поиска границ: "от<число>до<число>"
+            limits_pattern = r"от(\d+\.?\d*)до(\d+\.?\d*)"
+            match = re.search(limits_pattern, query)
+            
+            if match:
+                # Извлекаем границы
+                lower_limit = match.group(1)
+                upper_limit = match.group(2)
+                
+                # Извлекаем выражение (все, что между "интегралот" и "отXдоY")
+                expr_part = query.split("интегралот")[1].split("от" + match.group(0))[0]
+                expr_str = expr_part.replace("поdx", "").strip()
+            else:
+                # Неопределенный интеграл
+                expr_str = query.split("интегралот")[1].replace("поdx", "").strip()
+                lower_limit, upper_limit = None, None
 
-            steps = [
-                f"{self.LOCALES[lang]['integral']['function']}: {latex(expr)}",
-                f"{self.LOCALES[lang]['integral']['integral']}: {latex(integral)} + C"
-            ]
+            # Парсинг выражения
+            expr = parse_expr(expr_str, transformations=transformations)
+            
+            # Вычисление интеграла
+            if lower_limit and upper_limit:
+                integral = integrate(expr, (self.x, float(lower_limit), float(upper_limit)))
+                steps = [
+                    f"{self.LOCALES[lang]['integral']['function']}: {latex(expr)}",
+                    f"{self.LOCALES[lang]['integral']['integral']} от {lower_limit} до {upper_limit}: {latex(integral)}"
+                ]
+                code = f"""from sympy import symbols, integrate
+    x = symbols('x')
+    print(integrate({expr_str}, (x, {lower_limit}, {upper_limit})))"""
+            else:
+                integral = integrate(expr, self.x)
+                steps = [
+                    f"{self.LOCALES[lang]['integral']['function']}: {latex(expr)}",
+                    f"{self.LOCALES[lang]['integral']['integral']}: {latex(integral)} + C"
+                ]
+                code = f"""from sympy import symbols, integrate
+    x = symbols('x')
+    print(integrate({expr_str}, x))"""
 
             return {
-                "result": f"{latex(integral)} + C",
+                "result": latex(integral) + (" + C" if not (lower_limit and upper_limit) else ""),
                 "formatted_steps": "\n".join(steps),
-                "code": f"""from sympy import symbols, integrate
-x = symbols('x')
-print(integrate('{expr_str}', x))""",
+                "code": code,
                 "lang": lang
             }
-        except SympifyError as e:
+        except Exception as e:
             return self._error_response("parse", lang, error=str(e))
 
     def _solve_general(self, query: str, lang: str) -> Dict[str, Any]:
